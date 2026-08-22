@@ -24,7 +24,7 @@ kipp is the wire between them.
 current state, then reads changes in the order they happen. A late reader is
 never wrong, and there is no second channel to order against the first.
 
-**Any language joins.** `socat - UNIX-CONNECT:/run/user/1000/tildesh/shell` is
+**Any language joins.** `socat - UNIX-CONNECT:/run/user/1000/shell.sock` is
 a working client. A shell script reads it with `while read`. This is what makes
 a rewrite of one consumer a non-event.
 
@@ -48,8 +48,9 @@ fact is one more line.
 | | |
 | --- | --- |
 | `SPEC.md` | the protocol |
-| `kipp.c`, `kipp.h` | the implementation. C99, libc only |
+| `kipp.c`, `kipp.h` | the C implementation. C99, libc only |
 | `t_kipp.c` | tests |
+| `examples/` | readers in sh, Lua, Python and Odin, and a demo publisher |
 
 ## Build
 

@@ -47,7 +47,7 @@ connection, in the order they happen. The consumer writes commands on the same
 connection at any time.
 
 ```
-version	1	tildesh	proto=1
+version	1	shell	proto=1
 mon	eDP-1	w=2256	h=1504	scale=1.5
 focus	eDP-1
 tag	eDP-1	2	state=focused,occupied
