@@ -1,8 +1,5 @@
 # working notes and design records. SPEC.md is the only doc that ships.
 docs/
 
-# build
-build/
-*.o
-*.a
-*.so
+# the test binary
+t_kipp

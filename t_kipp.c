@@ -1,5 +1,4 @@
 /* kipp tests. `make check` */
-#include <assert.h>
 #include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>

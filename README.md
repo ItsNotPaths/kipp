@@ -53,9 +53,13 @@ fact is one more line.
 
 ## Build
 
+Vendor `kipp.c` and `kipp.h` into your own tree. There is no library to link
+and nothing to install.
+
 ```sh
-make          # libkipp.a
-make check    # tests
+make    # build and run the tests
 ```
 
-Or vendor `kipp.c` and `kipp.h` into your own tree.
+## License
+
+MIT. See [LICENSE](LICENSE).
