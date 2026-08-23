@@ -3,7 +3,19 @@
 Kind-first Inter-Process Protocol. A text line protocol for local IPC over a
 unix socket, plus a C implementation in one file.
 
-See [SPEC.md](SPEC.md).
+```
+version	1	shell	proto=1
+mon	eDP-1	w=2256	h=1504	scale=1.5
+tag	eDP-1	2	state=focused,occupied
+sync	state
+tag	eDP-1	3	state=focused,occupied
+key_press	super+3
+```
+
+Tab separated, kind first. Connect and you get everything true right now, then
+the changes as they happen. Write `TAG 4` back on the same connection.
+
+The whole thing is one page: [SPEC.md](SPEC.md).
 
 ## The use case
 
@@ -20,20 +32,20 @@ kipp is the wire between them.
 
 ## Why lines
 
-**One stream carries state and events.** A consumer connects, reads the full
-current state, then reads changes in the order they happen. A late reader is
-never wrong, and there is no second channel to order against the first.
+**One stream carries state and events.** Connect, read the full current state,
+then read changes in the order they happen. A late reader is never wrong, and
+there is no second channel to order against the first.
 
-**Any language joins.** `socat - UNIX-CONNECT:/run/user/1000/shell.sock` is
-a working client. A shell script reads it with `while read`. This is what makes
-a rewrite of one consumer a non-event.
+**Any language joins.** `socat - UNIX-CONNECT:/run/user/1000/shell.sock` is a
+working client. `while read` is enough. That is what makes rewriting a consumer
+a non-event.
 
-**A new fact costs one line.** The first field names the kind, and a reader
-skips a kind it does not know. Adding a fact changes no consumer.
+**A new fact costs one line.** The first field names the kind and a reader
+skips one it does not know, so adding a fact changes no consumer.
 
 **The protocol is the contract, not a library.** Each program implements the
-format in the language it already uses. Two implementations that drift still
-interoperate, which an ABI does not.
+format in whatever language it already uses. Two implementations that drift
+still interoperate. An ABI does not.
 
 ## Why not D-Bus
 

@@ -1,7 +1,7 @@
 # examples
 
-Each file reads kipp in one language and does nothing else. They exist to show
-the framing and the session, not to be vendored.
+Each file reads kipp in one language and does nothing else. They show the
+framing and the session. They are not meant to be vendored.
 
 `kipp.c` and `kipp.h` in the parent directory are the reference
 implementation: a server, a client, dump on accept, the state projection.
@@ -35,18 +35,18 @@ odin run read.odin -file
 ## What these are not
 
 **They are not a shared implementation.** A program that speaks kipp writes its
-own, in the language it already uses. `SPEC.md` is the contract, and two
-implementations that drift still interoperate, which is the reason the contract
-is a wire format and not a library.
+own, in whatever language it already uses. `SPEC.md` is the contract. Two
+implementations that drift still interoperate, and that is the whole reason the
+contract is a wire format rather than a library.
 
 **They are not copies of production code.** A program that serves kipp has a
 store, an event loop and a socket server. A reader here must never become a
-copy of that file. A copied implementation with no build and no tests in its
-new home is the definition of drift, and a stale example is worse than no
-example, because a stranger writes against it.
+copy of one. Code copied into a repo with no build and no tests around it is
+the definition of drift, and a stale example is worse than none: a stranger
+writes against it and finds out later.
 
-An example that shows only framing barely drifts, because version 1 framing
-does not move.
+An example that shows only framing barely drifts. Version 1 framing does not
+move.
 
 ## Adding a language
 

@@ -3,7 +3,8 @@
 Kind-first Inter-Process Protocol. Version 1.
 
 A text line protocol for local IPC over a unix socket. One publisher sends
-facts. Any number of consumers read them and send commands back.
+facts. Any number of consumers read them, and send commands back on the same
+connection.
 
 ## Framing
 
