@@ -11,7 +11,7 @@ These are readers, 30 to 110 lines each.
 | --- | --- |
 | `read.sh` | the wire is plain text. socat, `while read`, and a `case` |
 | `read.lua` | the parse rule alone. Reads lines on stdin |
-| `read.py` | the whole session. Connect, read the dump, send a command |
+| `read.py` | the whole session. Holds facts, so `drop` and `stale` do something |
 | `read.odin` | the same session with typed parsing and an arena |
 | `serve.c` | a publisher for the readers to talk to |
 | `check.sh` | runs every reader against `serve.c` and checks the output |

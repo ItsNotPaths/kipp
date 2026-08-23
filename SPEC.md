@@ -60,6 +60,35 @@ key_press	super+3
 A command gets no reply when it succeeds. The state lines that follow show the
 result.
 
+## Retraction, and doubt
+
+A fact can end in two ways, and they are not the same.
+
+**It is gone.** A `drop` line names the kind and subject of the fact. The
+consumer forgets it.
+
+```
+tray	:1.456/StatusNotifierItem	state=registered
+drop	tray	:1.456/StatusNotifierItem
+```
+
+**It is no longer visible.** The thing probably still exists, but whatever
+reported it stopped answering. A `stale` line names the same fields. The
+consumer keeps the fact and shows that it is old.
+
+```
+bt	00:11	name=Buds	state=connected
+stale	bt	00:11
+```
+
+Any later fact for that subject clears the mark. A publisher repeats a stale
+fact and its mark in the dump, so a consumer that connects afterward learns
+both.
+
+Sending the fact back with no attributes would not do for either. A consumer
+cannot tell that from a fact that has no attributes, and they mean opposite
+things.
+
 ## Errors
 
 A failed command gets one `error` line. The line names the command that failed.
@@ -98,11 +127,21 @@ error	toolong	msg=line over 1024 bytes
 A reader never rejects a line because the kind is unfamiliar. The check is on
 absence, not on presence.
 
-## The kind vocabulary
+## The kinds kipp defines
 
-kipp defines no kinds. A kind list is an agreement between the programs that
-share a socket, and it lives with those programs. A new kind costs one line and
-no consumer changes.
+kipp defines four kinds, all about the protocol itself. It defines no kind
+about anything else.
+
+| Kind | Direction | Means |
+| --- | --- | --- |
+| `version` | publisher | the greeting, first line of a session |
+| `sync` | publisher | `sync	state` ends the dump |
+| `error` | publisher | a command failed |
+| `drop` | publisher | a fact is gone. Its fields are the kind and subject |
+| `stale` | publisher | a fact is last-known, not current. Same fields |
+
+Every other kind is an agreement between the programs that share a socket, and
+lives with those programs. A new one costs one line and no consumer changes.
 
 ## Optional: the state projection
 

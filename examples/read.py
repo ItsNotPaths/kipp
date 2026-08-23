@@ -40,17 +40,31 @@ def main():
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.connect(SOCK)
 
+    # A real consumer holds facts, so drop and stale have something to act on.
+    # A consumer that only prints will show a tray icon for a dead process.
+    facts = {}
     synced = False
+
     for line in lines(s):
         m = parse(line)
         if m is None:
             continue                      # unparsable, skip
         kind, subj, attr = m
+
+        if kind == "drop":
+            facts.pop(tuple(subj), None)          # gone. Forget it
+        elif kind == "stale":
+            key = tuple(subj)
+            if key in facts:
+                facts[key] = (facts[key][0], True)  # last known, not current
+        elif kind not in ("version", "sync", "error"):
+            facts[(kind, *subj)] = (attr, False)  # a fact, and it is current
+
         print(f"{kind:12} {subj} {attr}", flush=True)
 
         if kind == "sync" and not synced:
             synced = True
-            print("--- state complete, sending TAG 4 ---", flush=True)
+            print(f"--- {len(facts)} facts, sending TAG 4 ---", flush=True)
             s.sendall(b"TAG\t4\n")
 
 

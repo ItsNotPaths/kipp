@@ -70,6 +70,10 @@ int main(int argc, char **argv)
 					kipp_ready(s, fds[i]);
 		if (++tick % 4 == 0)
 			kipp_cast(s, "key_press\tsuper+3");
+		if (tick == 6)
+			kipp_cast(s, "stale\tnet\twifi");        /* still there, unseen */
+		if (tick == 10)
+			kipp_cast(s, "drop\ttag\teDP-1\t2");    /* gone */
 	}
 	kipp_stop(s);
 	return 0;
