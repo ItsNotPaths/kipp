@@ -19,8 +19,26 @@ kind	<positional subject>	key=value	key=value
 - Every field from there is **`key=value`** and unordered.
 
 A kind is a word of lowercase letters, digits and underscores. A kind is never
-a number. A key follows the same rule. A value holds any byte except a tab, a
-newline and a control character.
+a number. A key follows the same rule.
+
+An **attribute value** holds any byte except a tab, a newline and a control
+character. Only the first `=` in a field separates the key from the value, so
+a value may hold more of them: `name=home=wifi` is one attribute.
+
+A **fact needs at least one subject field**, because the subject is what
+identifies it. A subject field may not hold `=`: the framing rule would read it
+as the first attribute, the fact would keep no subject, and its key would
+become the bare kind — colliding with every other fact of that kind. A writer
+must refuse such a line.
+
+A fact of which there can only ever be one still carries a subject. Write
+`uptime host secs=1234`, not `uptime secs=1234`.
+
+An **event** carries no current value, so it is never stored and needs no
+subject. `emit screenshot` and `key_press super+3` are complete.
+
+Choose a subject that cannot hold one: a UUID, a MAC, a bus name, a device
+path. A name a person typed belongs in an attribute.
 
 ## Case marks direction
 
