@@ -1,71 +1,69 @@
 #!/usr/bin/env python3
-"""kipp from Python. Connects, reads the dump, sends one command."""
+"""kipp from Python. Subscribes to everything, holds values, sends one request."""
+import os
 import socket
 import sys
 
-SOCK = sys.argv[1] if len(sys.argv) > 1 else "/tmp/kipp-demo.sock"
+SOCK = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
+    os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "kippsrv.sock")
 
 
 def parse(line):
-    """-> (kind, subject list, attribute dict). None when there is no kind."""
-    kind, subj, attr = None, [], {}
-    for f in line.split("\t"):
-        if not f:
-            continue
-        if kind is None:
-            if f.startswith("@"):      # reserved metadata
-                continue
-            kind = f
-        elif "=" in f[1:]:
-            k, _, v = f.partition("=")
-            attr[k] = v
-        else:
-            subj.append(f)
-    return (kind, subj, attr) if kind else None
+    """-> (verb, topic, fields). None when the line has no topic."""
+    words = [word for word in line.split("\t") if word]
+    if len(words) < 2:
+        return None
+    fields = {}
+    for word in words[2:]:
+        key, equals, value = word.partition("=")
+        if equals and key:              # not key=value: skip it
+            fields[key] = value
+    return words[0], words[1], fields
 
 
-def lines(sock):
-    buf = b""
+def lines(connection):
+    held = b""
     while True:
-        chunk = sock.recv(4096)
+        chunk = connection.recv(4096)
         if not chunk:
             return
-        buf += chunk
-        while b"\n" in buf:
-            line, _, buf = buf.partition(b"\n")
+        held += chunk
+        while b"\n" in held:
+            line, _, held = held.partition(b"\n")
             yield line.decode("utf-8", "replace")
 
 
 def main():
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.connect(SOCK)
+    connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    connection.connect(SOCK)
+    connection.sendall(b"connect\tread_py\nsubscribe\t*\n")
 
-    # A real consumer holds facts, so drop and stale have something to act on.
-    # A consumer that only prints will show a tray icon for a dead process.
-    facts = {}
+    # A real reader holds values, so a retain with no payload has something
+    # to forget, and status/* can mark a source's values as old.
+    values = {}
     synced = False
 
-    for line in lines(s):
-        m = parse(line)
-        if m is None:
-            continue                      # unparsable, skip
-        kind, subj, attr = m
+    for line in lines(connection):
+        message = parse(line)
+        if message is None:
+            continue                    # unparsable, skip
+        verb, topic, fields = message
 
-        if kind == "drop":
-            facts.pop(tuple(subj), None)          # gone. Forget it
-        elif kind == "stale":
-            key = tuple(subj)
-            if key in facts:
-                facts[key] = (facts[key][0], True)  # last known, not current
-        elif kind not in ("version", "sync", "error"):
-            facts[(kind, *subj)] = (attr, False)  # a fact, and it is current
+        if verb == "retain":
+            if fields:
+                values[topic] = fields
+            else:
+                values.pop(topic, None)  # no payload: gone. Forget it
 
-        print(f"{kind:12} {subj} {attr}", flush=True)
+        print(f"{verb:8} {topic:16} {fields}", flush=True)
 
-        if kind == "sync" and not synced:
+        if verb == "sync" and not synced:
             synced = True
-            print(f"--- {len(facts)} facts, sending TAG 4 ---", flush=True)
-            s.sendall(b"TAG\t4\n")
+            offline = [topic for topic, fields in values.items()
+                       if topic.startswith("status/") and fields.get("state") == "offline"]
+            print(f"--- {len(values)} values, {len(offline)} offline, "
+                  "requesting tag 4 ---", flush=True)
+            connection.sendall(b"publish\ttag/request\ttag=4\n")
 
 
 if __name__ == "__main__":

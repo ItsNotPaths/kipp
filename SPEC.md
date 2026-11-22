@@ -1,129 +1,188 @@
 # kipp
 
-Kind-first Inter-Process Protocol. Version 1.
+Kind-first Inter-Process Protocol. Version 2.
 
-A text line protocol for local IPC over a unix socket. One publisher sends
-facts. Any number of consumers read them, and send commands back on the same
-connection.
+A text line protocol for local IPC over a unix socket. One broker holds the
+socket. Clients connect to it, publish to topics and subscribe to topics. The
+rules are MQTT 3.1.1's. The wire is text, and MQTT's binary wire is never used.
 
 ## Framing
 
-One fact for each line. Fields are tab separated. The line ends with `\n`.
+One message for each line. Fields are tab separated. The line ends with `\n`.
 
 ```
-kind	<positional subject>	key=value	key=value
+verb	topic	key=value	key=value
 ```
 
-- Field 1 is the **kind**.
-- The fields after it are **positional subject**, up to the first field that
-  contains `=`.
-- Every field from there is **`key=value`** and unordered.
+- Field 1 is the **verb**.
+- Field 2 is the **topic**.
+- Every field after the topic is **`key=value`** and unordered. Together they
+  are the **payload**. A payload may be empty.
 
-A kind is a word of lowercase letters, digits and underscores. A kind is never
-a number. A key follows the same rule.
+A **key** is a word of lowercase letters, digits and underscores.
 
-An **attribute value** holds any byte except a tab, a newline and a control
-character. Only the first `=` in a field separates the key from the value, so
-a value may hold more of them: `name=home=wifi` is one attribute.
+A **value** holds any byte except a tab, a newline and a control character.
+Only the first `=` in a field separates the key from the value, so a value may
+hold more of them: `name=home=wifi` is one field.
 
-A **fact needs at least one subject field**, because the subject is what
-identifies it. A subject field may not hold `=`: the framing rule would read it
-as the first attribute, the fact would keep no subject, and its key would
-become the bare kind — colliding with every other fact of that kind. A writer
-must refuse such a line.
+A field after the topic with no `=` in it is not valid. A writer must refuse
+it, and a reader skips it.
 
-A fact of which there can only ever be one still carries a subject. Write
-`uptime host secs=1234`, not `uptime secs=1234`.
+A binary payload goes in a file. The line carries the path.
 
-An **event** carries no current value, so it is never stored and needs no
-subject. `emit screenshot` and `key_press super+3` are complete.
+## Topics
 
-Choose a subject that cannot hold one: a UUID, a MAC, a bus name, a device
-path. A name a person typed belongs in an attribute.
+A topic is segments joined by `/`: `tag/eDP-1/2`, `net/c8119aa9`, `notif/42`.
 
-## Case marks direction
+**The first segment is the kind.** A kind is a word of lowercase letters,
+digits and underscores, and it is never a number. The kind says what the
+message is about, so a reader can skip a kind it does not know.
 
-| Case | Meaning | Direction |
+The other segments hold any byte except a tab, a newline, a control character,
+`*`, `?` and `[`. Choose a segment that cannot change: a UUID, a MAC, a bus
+name, a device path. A name a person typed belongs in the payload.
+
+## Verbs
+
+| Verb | Sent by | Means |
 | --- | --- | --- |
-| lowercase | a fact | publisher to consumer |
-| UPPERCASE | a command | consumer to publisher |
+| `version` | broker | the greeting, first line of a session |
+| `connect` | client | names the client. First line a client sends |
+| `will` | client | a message the broker sends for the client when its connection ends |
+| `subscribe` | client | send me what matches this pattern |
+| `unsubscribe` | client | stop sending what matches this pattern |
+| `retain` | both | a value. The broker keeps it and forwards it |
+| `publish` | both | an event. The broker forwards it and keeps nothing |
+| `sync` | broker | the retained lines for one `subscribe` are all sent |
+| `error` | broker | a line from the client failed |
 
-```
-tag	eDP-1	2	state=focused
-TAG	4
-```
+A reader skips a line whose verb it does not know.
 
 ## Session
 
-A consumer connects to the socket. The publisher sends:
-
-1. One `version` line.
-2. The full current state, one line for each fact.
-3. One `sync	state` line.
-
-After `sync	state`, the publisher sends deltas, events and errors on the same
-connection, in the order they happen. The consumer writes commands on the same
-connection at any time.
+A client connects to the socket. The broker sends one `version` line:
 
 ```
-version	1	shell	proto=1
-mon	eDP-1	w=2256	h=1504	scale=1.5
-focus	eDP-1
-tag	eDP-1	2	state=focused,occupied
-mode	normal
-sync	state
-tag	eDP-1	3	state=focused,occupied
-key_press	super+3
+version	2	broker=kippsrv
 ```
 
-A command gets no reply when it succeeds. The state lines that follow show the
-result.
+The client sends `connect` with its name. The name follows the rule for a kind.
+If a second client connects with the same name, the broker closes the first
+one. The broker answers any other line sent before `connect` with
+`error noconnect`.
 
-## Retraction, and doubt
-
-A fact can end in two ways, and they are not the same.
-
-**It is gone.** A `drop` line names the kind and subject of the fact. The
-consumer forgets it.
-
-```
-tray	:1.456/StatusNotifierItem	state=registered
-drop	tray	:1.456/StatusNotifierItem
-```
-
-**It is no longer visible.** The thing probably still exists, but whatever
-reported it stopped answering. A `stale` line names the same fields. The
-consumer keeps the fact and shows that it is old.
+After `connect`, the client sends any of `will`, `subscribe`, `unsubscribe`,
+`retain` and `publish`, in any order and at any time. The broker sends forwarded
+lines, `sync` and `error` on the same connection, in the order they happen.
 
 ```
-bt	00:11	name=Buds	state=connected
-stale	bt	00:11
+version	2	broker=kippsrv
+connect	bar
+will	retain	status/bar	state=offline
+retain	status/bar	state=online
+subscribe	battery/*
+retain	battery/BAT0	level=80	state=charging
+sync	battery/*
+retain	battery/BAT0	level=79	state=charging
+publish	tag/request	tag=4
 ```
 
-Any later fact for that subject clears the mark. A publisher repeats a stale
-fact and its mark in the dump, so a consumer that connects afterward learns
-both.
+## Retain and publish
 
-Sending the fact back with no attributes would not do for either. A consumer
-cannot tell that from a fact that has no attributes, and they mean opposite
-things.
+**`retain`** is a value. The broker stores the line under its topic, replacing
+the one stored before, and forwards it to every client whose pattern matches.
+It forwards it as `retain`, so a reader knows that it is a value.
+
+**`retain` with no payload** deletes the value. The broker forgets the topic and
+forwards the line. A reader forgets the topic too.
+
+```
+retain	tray/:1.456	state=registered
+retain	tray/:1.456
+```
+
+**`publish`** is an event. The broker forwards it to every client whose pattern
+matches and stores nothing. A client that is not connected never sees it.
+
+```
+publish	key_press	key=super+3
+publish	screenshot
+```
+
+A client also gets its own lines back when one of its patterns matches them.
+
+A request is a `publish` to a topic that its handler subscribes to. It gets no
+reply when it succeeds. The `retain` lines that follow show the result. If no
+client subscribes, the broker drops it, as MQTT does.
+
+## Subscribe
+
+```
+subscribe	battery/*
+```
+
+The pattern is matched against the topic with `fnmatch(3)`, without
+`FNM_PATHNAME`. So `*` matches across `/`: `battery/*` is everything under
+battery, and `*` is everything.
+
+This is one of kipp's two changes to MQTT's rules. MQTT's `+` and `#` are not used.
+
+The broker answers a `subscribe` with every retained line that the pattern
+matches, then one `sync` line that repeats the pattern:
+
+```
+sync	battery/*
+```
+
+After `sync`, new lines that match arrive as they happen. A client that sends
+several subscribes knows from the pattern which set has ended.
+
+Subscribing to a pattern the client already holds sends the retained lines and
+the `sync` again. `unsubscribe` with the same pattern removes it.
+
+## Will
+
+```
+will	retain	status/bar	state=offline
+```
+
+The fields after `will` are one `retain` or `publish` line. When the client's
+connection ends, for any reason, the broker acts on that line as if the client
+had sent it. A later `will` replaces the earlier one.
+
+## Status
+
+A client says that it is up by retaining `status/<name>`, with its will setting
+the same topic to offline:
+
+```
+will	retain	status/bar	state=offline
+retain	status/bar	state=online
+```
+
+When a program stops answering, its last values stay retained but are old.
+A reader that subscribes to `status/*` learns this and can show them as old.
+Which topics belong to which status is agreed between those programs, like any
+other kind.
 
 ## Errors
 
-A failed command gets one `error` line. The line names the command that failed.
+A failed line gets one `error` line. The second field is a code, not a topic.
 
 ```
-error	badcmd	cmd=TGA	msg=unknown command
-error	badarg	cmd=TAG	msg=tag out of range
+error	badverb	verb=pubish	msg=unknown verb
+error	badtopic	topic=Tag/1	msg=kind must be lowercase
+error	noconnect	msg=send connect first
 error	toolong	msg=line over 1024 bytes
 ```
 
 | Code | Meaning |
 | --- | --- |
-| `badcmd` | the verb is unknown |
-| `badarg` | the verb is known and an argument is wrong |
+| `badverb` | the verb is unknown |
+| `badtopic` | the topic or pattern breaks the topic rules |
+| `badarg` | the verb is known and another field is wrong |
+| `noconnect` | the line came before `connect` |
 | `toolong` | the line passed the byte limit |
-| `nosrc` | the command needs a source that is not connected |
 
 ## Limits
 
@@ -136,48 +195,30 @@ error	toolong	msg=line over 1024 bytes
 
 | Condition | Behavior |
 | --- | --- |
+| unknown verb, at a client | skip the line |
+| unknown verb, at the broker | send `error badverb` |
 | unknown kind | skip the line |
 | unknown key | skip the field |
-| expected kind never arrives | the consumer reports it |
+| expected kind never arrives | the reader reports it |
 | line over the limit | reject it, and send `error toolong` |
 | control character in a value | the writer removes it |
-| publisher exits | every consumer reads EOF |
+| broker exits | every client reads EOF |
 
 A reader never rejects a line because the kind is unfamiliar. The check is on
 absence, not on presence.
 
-## The kinds kipp defines
-
-kipp defines four kinds, all about the protocol itself. It defines no kind
-about anything else.
-
-| Kind | Direction | Means |
-| --- | --- | --- |
-| `version` | publisher | the greeting, first line of a session |
-| `sync` | publisher | `sync	state` ends the dump |
-| `error` | publisher | a command failed |
-| `drop` | publisher | a fact is gone. Its fields are the kind and subject |
-| `stale` | publisher | a fact is last-known, not current. Same fields |
-
-Every other kind is an agreement between the programs that share a socket, and
-lives with those programs. A new one costs one line and no consumer changes.
-
 ## Optional: the state projection
 
-A publisher can also write the state to a file, in the same format. It writes a
-temporary file and renames it over the target, so a reader never sees half a
-file. This file serves readers that will not hold a connection.
+A broker can also write its retained lines to a file, in the same format. It
+writes a temporary file and renames it over the target, so a reader never sees
+half a file. This file serves readers that will not hold a connection.
 
 A reader that watches this file must watch the **directory** with
 `IN_CLOSE_WRITE | IN_MOVED_TO`. A rename makes a new inode, and a plain file
 watch goes deaf.
 
-## Reserved
-
-A field that starts with `@`, before the kind, is reserved for message metadata.
-Version 1 never sends one. A reader skips it.
-
 ## Reference implementation
 
-`kipp.c` and `kipp.h`. C99, libc only. Vendor the two files. The wire is the
-contract, so two implementations that drift still interoperate.
+`kipp.c` and `kipp.h` are a client. C99, libc only. Vendor the two files. The
+broker is kippsrv. The wire is the contract, so two implementations that drift
+still interoperate.

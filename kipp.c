@@ -11,529 +11,359 @@
 
 #include "kipp.h"
 
-#define MAX_CONN 32
-
 /* ------------------------------------------------------------------ util */
+
+static int is_control(unsigned char character)
+{
+	return character < 0x20 || character == 0x7f;
+}
 
 /* Tabs and newlines frame the protocol, so no value may hold one. Every
  * control character goes the same way. */
-static void sanitize(char *dst, size_t cap, const char *src)
+static void sanitize(char *target, size_t capacity, const char *source)
 {
-	size_t n = 0;
+	size_t length = 0;
 
-	while (*src && n + 1 < cap) {
-		unsigned char c = (unsigned char)*src++;
-		if (c >= 0x20 && c != 0x7f)
-			dst[n++] = (char)c;
+	while (*source && length + 1 < capacity) {
+		unsigned char character = (unsigned char)*source++;
+		if (!is_control(character))
+			target[length++] = (char)character;
 	}
-	dst[n] = 0;
+	target[length] = 0;
 }
 
-static int set_flags(int fd)
+static int has_control(const char *text)
 {
-	int fl = fcntl(fd, F_GETFL);
-
-	if (fl < 0 || fcntl(fd, F_SETFL, fl | O_NONBLOCK) < 0)
-		return -1;
-	return fcntl(fd, F_SETFD, FD_CLOEXEC);
-}
-
-static int addr_of(struct sockaddr_un *a, const char *path)
-{
-	if (strlen(path) >= sizeof(a->sun_path))
-		return -1;
-	memset(a, 0, sizeof(*a));
-	a->sun_family = AF_UNIX;
-	strcpy(a->sun_path, path);
+	while (*text)
+		if (is_control((unsigned char)*text++))
+			return 1;
 	return 0;
 }
 
-/* One line plus its newline. Fails the client rather than blocking it: on a
- * local socket a short write means the reader has stopped reading. */
-static int wr(int fd, const char *line)
-{
-	char buf[KIPP_MAX_LINE + 1];
-	int  n = snprintf(buf, sizeof(buf), "%s\n", line);
-	ssize_t w;
+#define DIGITS "0123456789"
 
-	if (n <= 0 || n >= (int)sizeof(buf))
-		return -1;
-	w = send(fd, buf, (size_t)n, MSG_NOSIGNAL);
-	return w == n ? 0 : -1;
+/* start..end lies inside a terminated string, so strspn may read past end. */
+static int is_word(const char *start, const char *end)
+{
+	size_t length = (size_t)(end - start);
+
+	return length > 0 && strspn(start, "abcdefghijklmnopqrstuvwxyz_" DIGITS) >= length;
 }
 
-/* -------------------------------------------------------------- read buf */
+static int is_kind(const char *start, const char *end)
+{
+	return is_word(start, end) && strspn(start, DIGITS) < (size_t)(end - start);
+}
 
-struct rdbuf {
-	char b[KIPP_MAX_LINE + 1];
-	int  len;
-	int  skip;      /* discarding the tail of an overlong line */
+static int is_topic(const char *topic)
+{
+	const char *slash = strchr(topic, '/');
+	const char *kind_end = slash ? slash : topic + strlen(topic);
+
+	return is_kind(topic, kind_end) && !has_control(kind_end) &&
+	       !strpbrk(kind_end, "*?[");
+}
+
+static int address_of(struct sockaddr_un *address, const char *path)
+{
+	if (strlen(path) >= sizeof(address->sun_path))
+		return -1;
+	memset(address, 0, sizeof(*address));
+	address->sun_family = AF_UNIX;
+	strcpy(address->sun_path, path);
+	return 0;
+}
+
+/* One line plus its newline. Fails rather than blocking: on a local socket a
+ * short write means the reader has stopped reading. */
+static int write_line(int descriptor, const char *line)
+{
+	char buffer[KIPP_MAX_LINE + 1];
+	int  length = snprintf(buffer, sizeof(buffer), "%s\n", line);
+
+	if (length <= 0 || length >= (int)sizeof(buffer))
+		return -1;
+	return send(descriptor, buffer, (size_t)length, MSG_NOSIGNAL) == length ? 0 : -1;
+}
+
+/* ----------------------------------------------------------------- input */
+
+struct input {
+	char bytes[KIPP_MAX_LINE + 1];
+	int  length;
+	int  skipping;  /* discarding the tail of an overlong line */
 };
 
 /* 1 got bytes, 0 nothing waiting, -1 the peer is gone. */
-static int rd_pull(int fd, struct rdbuf *r)
+static int input_fill(int descriptor, struct input *input)
 {
-	ssize_t n;
+	ssize_t count;
 
-	if (r->len == (int)sizeof(r->b))
-		return 1;   /* full. rd_take decides what that means */
-	n = recv(fd, r->b + r->len, sizeof(r->b) - (size_t)r->len, 0);
-	if (n > 0) {
-		r->len += (int)n;
+	if (input->length == (int)sizeof(input->bytes))
+		return 1;   /* full. input_take decides what that means */
+	count = recv(descriptor, input->bytes + input->length,
+	             sizeof(input->bytes) - (size_t)input->length, 0);
+	if (count > 0) {
+		input->length += (int)count;
 		return 1;
 	}
-	if (n == 0)
+	if (count == 0)
 		return -1;
 	return (errno == EAGAIN || errno == EWOULDBLOCK) ? 0 : -1;
 }
 
-/* 1 a line is in out, 0 need more bytes, -1 the line was too long. */
-static int rd_take(struct rdbuf *r, char *out)
+/* 1 a line is in line, 0 need more bytes, -1 the line was too long. */
+static int input_take(struct input *input, char *line)
 {
 	for (;;) {
-		char *nl = memchr(r->b, '\n', (size_t)r->len);
-		int   got, used;
+		char *newline = memchr(input->bytes, '\n', (size_t)input->length);
+		int   wanted, used;
 
-		if (!nl) {
-			if (r->len < (int)sizeof(r->b))
+		if (!newline) {
+			if (input->length < (int)sizeof(input->bytes))
 				return 0;
-			r->len = 0;
-			r->skip = 1;
+			input->length = 0;
+			input->skipping = 1;
 			return -1;
 		}
-		*nl = 0;
-		got = !r->skip;          /* a skipped line ends at this newline */
-		if (got)
-			memcpy(out, r->b, (size_t)(nl - r->b) + 1);
-		r->skip = 0;
+		*newline = 0;
+		wanted = !input->skipping;   /* a skipped line ends at this newline */
+		if (wanted)
+			memcpy(line, input->bytes, (size_t)(newline - input->bytes) + 1);
+		input->skipping = 0;
 
-		used = (int)(nl - r->b) + 1;
-		r->len -= used;
-		memmove(r->b, nl + 1, (size_t)r->len);
-		if (got)
+		used = (int)(newline - input->bytes) + 1;
+		input->length -= used;
+		memmove(input->bytes, newline + 1, (size_t)input->length);
+		if (wanted)
 			return 1;
 	}
 }
 
 /* --------------------------------------------------------------- parsing */
 
-int kipp_parse(struct kipp_msg *m, const char *line)
+static char *next_field(char **cursor, char *end)
 {
-	char *p, *end;
-	int   first = 1;
+	char *field = *cursor;
+	char *tab = memchr(field, '\t', (size_t)(end - field));
 
-	if (!line || strlen(line) >= sizeof(m->buf))
-		return -1;
-	strcpy(m->buf, line);
-
-	m->kind = NULL;
-	m->nsubj = 0;
-	m->nattr = 0;
-
-	p = m->buf;
-	end = p + strlen(p);
-	if (end > p && end[-1] == '\r')
-		*--end = 0;
-
-	while (p < end) {
-		char *tab = memchr(p, '\t', (size_t)(end - p));
-		char *f = p;
-		char *eq;
-
-		if (tab) {
-			*tab = 0;
-			p = tab + 1;
-		} else {
-			p = end;
-		}
-		if (!*f)
-			continue;
-
-		if (first) {
-			if (*f == '@')      /* reserved. The kind follows it. */
-				continue;
-			first = 0;
-			m->kind = f;
-			continue;
-		}
-		if (!m->kind)
-			return -1;
-
-		eq = strchr(f, '=');
-		if (eq && eq != f) {
-			if (m->nattr == KIPP_MAX_FIELDS)
-				continue;
-			*eq = 0;
-			m->attr[m->nattr].k = f;
-			m->attr[m->nattr].v = eq + 1;
-			m->nattr++;
-		} else if (m->nsubj < KIPP_MAX_FIELDS) {
-			m->subj[m->nsubj++] = f;
-		}
-	}
-	return m->kind ? 0 : -1;
+	if (tab)
+		*tab = 0;
+	*cursor = tab ? tab + 1 : end;
+	return field;
 }
 
-const char *kipp_attr(const struct kipp_msg *m, const char *key)
+static void add_field(struct kipp_message *message, char *field)
 {
-	int i;
+	char *equals = strchr(field, '=');
 
-	for (i = 0; i < m->nattr; i++)
-		if (strcmp(m->attr[i].k, key) == 0)
-			return m->attr[i].v;
+	if (!equals || equals == field || message->field_count == KIPP_MAX_FIELDS)
+		return;   /* not key=value. Skip it */
+	*equals = 0;
+	message->field[message->field_count].key = field;
+	message->field[message->field_count].value = equals + 1;
+	message->field_count++;
+}
+
+int kipp_parse(struct kipp_message *message, const char *line)
+{
+	char  *cursor, *end;
+	size_t length;
+
+	if (!line || (length = strlen(line)) >= sizeof(message->buffer))
+		return -1;
+	memcpy(message->buffer, line, length + 1);
+
+	message->verb = NULL;
+	message->topic = NULL;
+	message->field_count = 0;
+
+	cursor = message->buffer;
+	end = cursor + length;
+	if (end > cursor && end[-1] == '\r')
+		*--end = 0;
+
+	while (cursor < end) {
+		char *field = next_field(&cursor, end);
+
+		if (!*field)
+			continue;
+		if (!message->verb)
+			message->verb = field;
+		else if (!message->topic)
+			message->topic = field;
+		else
+			add_field(message, field);
+	}
+	return message->topic ? 0 : -1;
+}
+
+const char *kipp_value(const struct kipp_message *message, const char *key)
+{
+	int index;
+
+	for (index = 0; index < message->field_count; index++)
+		if (strcmp(message->field[index].key, key) == 0)
+			return message->field[index].value;
 	return NULL;
 }
 
-int kipp_is_cmd(const struct kipp_msg *m)
+int kipp_kind_is(const struct kipp_message *message, const char *kind)
 {
-	return m->kind && m->kind[0] >= 'A' && m->kind[0] <= 'Z';
+	size_t length = strlen(kind);
+
+	return strncmp(message->topic, kind, length) == 0 &&
+	       (message->topic[length] == '/' || message->topic[length] == 0);
 }
 
 /* -------------------------------------------------------------- building */
 
-void kipp_begin(struct kipp_out *o, const char *kind)
+void kipp_begin(struct kipp_record *record, const char *verb, const char *topic)
 {
-	o->over = 0;
-	sanitize(o->buf, sizeof(o->buf), kind);
-	o->len = (int)strlen(o->buf);
+	record->length = snprintf(record->buffer, sizeof(record->buffer), "%s\t%s",
+	                          verb, topic);
+	record->refused = !is_word(verb, verb + strlen(verb)) || !is_topic(topic) ||
+	                  record->length >= (int)sizeof(record->buffer);
 }
 
-void kipp_add(struct kipp_out *o, const char *fmt, ...)
+void kipp_add(struct kipp_record *record, const char *key, const char *format, ...)
 {
 	char raw[KIPP_MAX_LINE];
 	char clean[KIPP_MAX_LINE];
-	va_list ap;
-	int n;
+	int  room = (int)sizeof(record->buffer) - record->length;
+	int  length;
+	va_list arguments;
 
-	if (o->over)
+	if (record->refused)
 		return;
-
-	va_start(ap, fmt);
-	n = vsnprintf(raw, sizeof(raw), fmt, ap);
-	va_end(ap);
-	if (n < 0) {
-		o->over = 1;
+	va_start(arguments, format);
+	length = vsnprintf(raw, sizeof(raw), format, arguments);
+	va_end(arguments);
+	if (!is_word(key, key + strlen(key)) || length < 0 || length >= (int)sizeof(raw)) {
+		record->refused = 1;
 		return;
 	}
 	sanitize(clean, sizeof(clean), raw);
 
-	n = (int)strlen(clean);
-	if (o->len + 1 + n + 1 > (int)sizeof(o->buf)) {
-		o->over = 1;
+	length = snprintf(record->buffer + record->length, (size_t)room,
+	                  "\t%s=%s", key, clean);
+	if (length >= room) {
+		record->refused = 1;
 		return;
 	}
-	o->buf[o->len++] = '\t';
-	memcpy(o->buf + o->len, clean, (size_t)n + 1);
-	o->len += n;
+	record->length += length;
 }
 
-const char *kipp_str(struct kipp_out *o)
+const char *kipp_text(const struct kipp_record *record)
 {
-	return o->over ? NULL : o->buf;
-}
-
-/* ---------------------------------------------------------------- server */
-
-struct conn {
-	int          fd;
-	struct rdbuf r;
-};
-
-struct kipp_srv {
-	int          fd;                /* listening */
-	char         path[108];
-	struct conn  c[MAX_CONN];
-	int          nc;
-	kipp_dump_fn dump;
-	kipp_cmd_fn  cmd;
-	void        *user;
-	char         greet[KIPP_MAX_LINE];
-};
-
-static void drop(struct kipp_srv *s, int i)
-{
-	close(s->c[i].fd);
-	s->c[i] = s->c[--s->nc];
-}
-
-/* A live owner answers a connect. A stale socket does not. */
-static int in_use(const char *path)
-{
-	struct sockaddr_un a;
-	int fd, ok;
-
-	if (addr_of(&a, path) < 0)
-		return 1;
-	fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-	if (fd < 0)
-		return 0;
-	ok = connect(fd, (struct sockaddr *)&a, sizeof(a)) == 0;
-	close(fd);
-	return ok;
-}
-
-struct kipp_srv *kipp_serve(const char *path, const char *greet,
-                            kipp_dump_fn dump, kipp_cmd_fn cmd, void *user)
-{
-	struct sockaddr_un a;
-	struct kipp_srv *s;
-
-	if (addr_of(&a, path) < 0 || in_use(path)) {
-		errno = EADDRINUSE;
-		return NULL;
-	}
-	s = calloc(1, sizeof(*s));
-	if (!s)
-		return NULL;
-	s->fd = -1;
-
-	s->fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
-	if (s->fd < 0)
-		goto fail;
-
-	unlink(path);
-	if (bind(s->fd, (struct sockaddr *)&a, sizeof(a)) < 0)
-		goto fail;
-	if (listen(s->fd, 8) < 0)
-		goto fail;
-
-	snprintf(s->path, sizeof(s->path), "%s", path);
-	snprintf(s->greet, sizeof(s->greet), "%s", greet ? greet : "version\t1");
-	s->dump = dump;
-	s->cmd = cmd;
-	s->user = user;
-	return s;
-
-fail:
-	if (s->fd >= 0)
-		close(s->fd);
-	free(s);
-	return NULL;
-}
-
-void kipp_stop(struct kipp_srv *s)
-{
-	int i;
-
-	if (!s)
-		return;
-	for (i = 0; i < s->nc; i++)
-		close(s->c[i].fd);
-	close(s->fd);
-	unlink(s->path);
-	free(s);
-}
-
-int kipp_nfds(struct kipp_srv *s) { return 1 + s->nc; }
-
-int kipp_fd(struct kipp_srv *s, int i)
-{
-	return i == 0 ? s->fd : s->c[i - 1].fd;
-}
-
-static void accept_one(struct kipp_srv *s)
-{
-	int fd = accept(s->fd, NULL, NULL);
-
-	if (fd < 0)
-		return;
-	if (set_flags(fd) < 0 || s->nc == MAX_CONN) {
-		close(fd);
-		return;
-	}
-	if (wr(fd, s->greet) < 0) {
-		close(fd);
-		return;
-	}
-	s->c[s->nc].fd = fd;
-	s->c[s->nc].r.len = 0;
-	s->c[s->nc].r.skip = 0;
-	s->nc++;
-
-	if (s->dump)
-		s->dump(s, fd, s->user);
-	kipp_sendto(s, fd, "sync\tstate");
-}
-
-static void read_conn(struct kipp_srv *s, int i)
-{
-	char line[KIPP_MAX_LINE];
-	struct kipp_msg m;
-
-	for (;;) {
-		int t = rd_take(&s->c[i].r, line);
-
-		if (t == -1) {
-			kipp_error(s, s->c[i].fd, "toolong", NULL,
-			           "line over 1024 bytes");
-			continue;
-		}
-		if (t == 0) {
-			int p = rd_pull(s->c[i].fd, &s->c[i].r);
-
-			if (p == 0)
-				return;
-			if (p < 0) {
-				drop(s, i);
-				return;
-			}
-			continue;
-		}
-		if (kipp_parse(&m, line) < 0) {
-			kipp_error(s, s->c[i].fd, "badcmd", NULL, "unparsable line");
-			continue;
-		}
-		if (s->cmd)
-			s->cmd(s, &m, s->c[i].fd, s->user);
-	}
-}
-
-/* By fd, not by index: this call can drop a consumer, and a caller part way
- * through its poll set must not have the rest shift under it. */
-void kipp_ready(struct kipp_srv *s, int fd)
-{
-	int i;
-
-	if (fd == s->fd) {
-		accept_one(s);
-		return;
-	}
-	for (i = 0; i < s->nc; i++)
-		if (s->c[i].fd == fd) {
-			read_conn(s, i);
-			return;
-		}
-}
-
-void kipp_sendto(struct kipp_srv *s, int fd, const char *line)
-{
-	int i;
-
-	if (!line)
-		return;
-	if (wr(fd, line) == 0)
-		return;
-	for (i = 0; i < s->nc; i++)
-		if (s->c[i].fd == fd) {
-			drop(s, i);
-			return;
-		}
-}
-
-void kipp_cast(struct kipp_srv *s, const char *line)
-{
-	int i = 0;
-
-	if (!line)
-		return;
-	while (i < s->nc) {
-		if (wr(s->c[i].fd, line) < 0)
-			drop(s, i);   /* drop() moves the last conn into i */
-		else
-			i++;
-	}
-}
-
-void kipp_error(struct kipp_srv *s, int fd, const char *code,
-                const char *cmd, const char *msg)
-{
-	struct kipp_out o;
-
-	kipp_begin(&o, "error");
-	kipp_add(&o, "%s", code);
-	if (cmd)
-		kipp_add(&o, "cmd=%s", cmd);
-	if (msg)
-		kipp_add(&o, "msg=%s", msg);
-	kipp_sendto(s, fd, kipp_str(&o));
+	return record->refused ? NULL : record->buffer;
 }
 
 /* ---------------------------------------------------------------- client */
 
-struct kipp_cli {
-	int          fd;
-	struct rdbuf r;
+struct kipp_client {
+	int          descriptor;
+	struct input input;
 };
 
-struct kipp_cli *kipp_open(const char *path)
+static int send_joined(struct kipp_client *client, const char *verb, const char *rest)
 {
-	struct sockaddr_un a;
-	struct kipp_cli *c;
-	int fd;
+	char line[KIPP_MAX_LINE];
+	int  length;
 
-	if (addr_of(&a, path) < 0)
-		return NULL;
-	fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-	if (fd < 0)
-		return NULL;
-	if (connect(fd, (struct sockaddr *)&a, sizeof(a)) < 0 || set_flags(fd) < 0) {
-		close(fd);
-		return NULL;
-	}
-	c = calloc(1, sizeof(*c));
-	if (!c) {
-		close(fd);
-		return NULL;
-	}
-	c->fd = fd;
-	return c;
+	if (!rest)
+		return -1;
+	length = snprintf(line, sizeof(line), "%s\t%s", verb, rest);
+	if (length < 0 || length >= (int)sizeof(line))
+		return -1;
+	return write_line(client->descriptor, line);
 }
 
-void kipp_close(struct kipp_cli *c)
+static int send_pattern(struct kipp_client *client, const char *verb, const char *pattern)
 {
-	if (!c)
+	if (!pattern || has_control(pattern))
+		return -1;
+	return send_joined(client, verb, pattern);
+}
+
+struct kipp_client *kipp_open(const char *path, const char *name)
+{
+	struct sockaddr_un  address;
+	struct kipp_client *client;
+	int descriptor, flags;
+
+	if (!is_kind(name, name + strlen(name)) || address_of(&address, path) < 0) {
+		errno = EINVAL;
+		return NULL;
+	}
+	descriptor = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+	if (descriptor < 0)
+		return NULL;
+	if (connect(descriptor, (struct sockaddr *)&address, sizeof(address)) < 0 ||
+	    (flags = fcntl(descriptor, F_GETFL)) < 0 ||
+	    fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) < 0) {
+		close(descriptor);
+		return NULL;
+	}
+	client = calloc(1, sizeof(*client));
+	if (!client) {
+		close(descriptor);
+		return NULL;
+	}
+	client->descriptor = descriptor;
+	if (send_joined(client, "connect", name) < 0) {
+		kipp_close(client);
+		return NULL;
+	}
+	return client;
+}
+
+void kipp_close(struct kipp_client *client)
+{
+	if (!client)
 		return;
-	close(c->fd);
-	free(c);
+	close(client->descriptor);
+	free(client);
 }
 
-int kipp_cli_fd(struct kipp_cli *c) { return c->fd; }
+int kipp_descriptor(struct kipp_client *client) { return client->descriptor; }
 
-int kipp_recv(struct kipp_cli *c, struct kipp_msg *m)
+int kipp_receive(struct kipp_client *client, struct kipp_message *message)
 {
 	char line[KIPP_MAX_LINE];
 
 	for (;;) {
-		int t = rd_take(&c->r, line);
+		int result = input_take(&client->input, line);
 
-		if (t == -1)
-			continue;               /* an overlong line. Skip it. */
-		if (t == 1) {
-			if (kipp_parse(m, line) == 0)
+		if (result == -1)
+			continue;               /* an overlong line. Skip it */
+		if (result == 1) {
+			if (kipp_parse(message, line) == 0)
 				return 1;
-			continue;               /* unparsable. Skip it. */
+			continue;               /* unparsable. Skip it */
 		}
-		t = rd_pull(c->fd, &c->r);
-		if (t == 0)
-			return 0;
-		if (t < 0)
-			return -1;
+		result = input_fill(client->descriptor, &client->input);
+		if (result <= 0)
+			return result;
 	}
 }
 
-int kipp_send(struct kipp_cli *c, const char *line)
+int kipp_send(struct kipp_client *client, const char *line)
 {
-	return line ? wr(c->fd, line) : -1;
+	return line ? write_line(client->descriptor, line) : -1;
 }
 
-/* --------------------------------------------------- state projection */
-
-int kipp_state_write(const char *path, const char *text, size_t len)
+int kipp_will(struct kipp_client *client, const char *line)
 {
-	char tmp[256];
-	int  fd;
-	ssize_t w;
+	return send_joined(client, "will", line);
+}
 
-	if (snprintf(tmp, sizeof(tmp), "%s.tmp", path) >= (int)sizeof(tmp))
-		return -1;
-	fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-	if (fd < 0)
-		return -1;
-	w = write(fd, text, len);
-	close(fd);
-	if (w != (ssize_t)len || rename(tmp, path) < 0) {
-		unlink(tmp);
-		return -1;
-	}
-	return 0;
+int kipp_subscribe(struct kipp_client *client, const char *pattern)
+{
+	return send_pattern(client, "subscribe", pattern);
+}
+
+int kipp_unsubscribe(struct kipp_client *client, const char *pattern)
+{
+	return send_pattern(client, "unsubscribe", pattern);
 }

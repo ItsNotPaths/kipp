@@ -1,27 +1,31 @@
 -- kipp parsing in Lua. Reads lines on stdin:
---   socat -u UNIX-CONNECT:/tmp/kipp-demo.sock - | lua read.lua
+--   printf 'connect\tread_lua\nsubscribe\t*\n' |
+--     socat - UNIX-CONNECT:"$XDG_RUNTIME_DIR/kippsrv.sock" | lua read.lua
 
 local function parse(line)
-	local kind, subj, attr = nil, {}, {}
-	for w in line:gmatch("[^\t]+") do
-		if not kind then
-			if w:sub(1, 1) ~= "@" then kind = w end   -- @ is reserved
+	local verb, topic, fields = nil, nil, {}
+	for word in line:gmatch("[^\t]+") do
+		if not verb then
+			verb = word
+		elseif not topic then
+			topic = word
 		else
-			local k, v = w:match("^([%w_]+)=(.*)$")
-			if k then attr[k] = v else subj[#subj + 1] = w end
+			local key, value = word:match("^([%l%d_]+)=(.*)$")
+			if key then fields[key] = value end   -- not key=value: skip it
 		end
 	end
-	return kind, subj, attr
+	return verb, topic, fields
 end
 
 for line in io.lines() do
-	local kind, subj, attr = parse(line)
-	if kind == "tag" then
-		print(("tag %s on %s is %s"):format(subj[2], subj[1], attr.state))
-	elseif kind == "net" then
-		print(("net %s ssid=%s signal=%s"):format(subj[1], attr.ssid, attr.signal))
-	elseif kind == "sync" then
-		print("--- state complete ---")
+	local verb, topic, fields = parse(line)
+	local kind, rest = (topic or ""):match("^([^/]*)/?(.*)$")
+	if verb == "retain" and kind == "tag" then
+		print(("tag %s is %s"):format(rest, fields.state or "gone"))
+	elseif verb == "retain" and kind == "net" then
+		print(("net %s ssid=%s signal=%s"):format(rest, fields.ssid, fields.signal))
+	elseif verb == "sync" then
+		print("--- " .. topic .. " complete ---")
 	end
-	-- every other kind falls through and is skipped
+	-- every other verb and kind falls through and is skipped
 end

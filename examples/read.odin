@@ -1,4 +1,4 @@
-// kipp from Odin. Connects, reads the dump, prints each line parsed.
+// kipp from Odin. Subscribes to everything, prints each line parsed.
 //   odin run read.odin -file
 package main
 
@@ -10,86 +10,84 @@ import "core:sys/posix"
 
 MAX_LINE :: 1024
 
-Msg :: struct {
-	kind: string,
-	subj: [dynamic]string,
-	attr: map[string]string,
+Message :: struct {
+	verb:   string,
+	topic:  string,
+	fields: map[string]string,
 }
 
-// The framing rule: field 1 is the kind, then positional subject up to the
-// first field holding '=', then key=value.
-parse :: proc(line: string, allocator := context.allocator) -> (m: Msg, ok: bool) {
-	m.subj = make([dynamic]string, allocator)
-	m.attr = make(map[string]string, allocator = allocator)
+// The framing rule: field 1 is the verb, field 2 the topic, then key=value.
+parse :: proc(line: string, allocator := context.allocator) -> (message: Message, ok: bool) {
+	message.fields = make(map[string]string, allocator = allocator)
 
 	rest := line
-	for f in strings.split_iterator(&rest, "\t") {
-		if f == "" do continue
-		if m.kind == "" {
-			if strings.has_prefix(f, "@") do continue // reserved
-			m.kind = f
-			continue
-		}
-		if i := strings.index_byte(f, '='); i > 0 {
-			m.attr[f[:i]] = f[i + 1:]
-		} else {
-			append(&m.subj, f)
-		}
+	for field in strings.split_iterator(&rest, "\t") {
+		if field == "" do continue
+		if message.verb == "" {
+			message.verb = field
+		} else if message.topic == "" {
+			message.topic = field
+		} else if equals := strings.index_byte(field, '='); equals > 0 {
+			message.fields[field[:equals]] = field[equals + 1:]
+		} // not key=value: skip it
 	}
-	return m, m.kind != ""
+	return message, message.topic != ""
 }
 
 dial :: proc(path: string) -> (posix.FD, bool) {
-	addr: posix.sockaddr_un
-	addr.sun_family = .UNIX
-	if len(path) >= len(addr.sun_path) do return -1, false
-	copy(addr.sun_path[:], transmute([]c.char)path)
+	address: posix.sockaddr_un
+	address.sun_family = .UNIX
+	if len(path) >= len(address.sun_path) do return -1, false
+	copy(address.sun_path[:], transmute([]c.char)path)
 
-	fd := posix.socket(.UNIX, .STREAM)
-	if fd < 0 do return -1, false
-	if posix.connect(fd, (^posix.sockaddr)(&addr), size_of(addr)) != .OK {
-		posix.close(fd)
+	descriptor := posix.socket(.UNIX, .STREAM)
+	if descriptor < 0 do return -1, false
+	if posix.connect(descriptor, (^posix.sockaddr)(&address), size_of(address)) != .OK {
+		posix.close(descriptor)
 		return -1, false
 	}
-	return fd, true
+	return descriptor, true
 }
 
 main :: proc() {
-	path := len(os.args) > 1 ? os.args[1] : "/tmp/kipp-demo.sock"
+	path := len(os.args) > 1 ? os.args[1] : fmt.tprintf("%s/kippsrv.sock", os.get_env("XDG_RUNTIME_DIR", context.temp_allocator))
 
-	fd, ok := dial(path)
+	descriptor, ok := dial(path)
 	if !ok {
 		fmt.eprintfln("cannot connect to %s", path)
 		os.exit(1)
 	}
-	defer posix.close(fd)
+	defer posix.close(descriptor)
 
-	buf: [4096]byte
+	hello := "connect\tread_odin\nsubscribe\t*\n"
+	posix.send(descriptor, raw_data(hello), len(hello), {})
+
+	chunk: [4096]byte
 	held: [dynamic]byte
 	defer delete(held)
 
 	for {
-		n := posix.recv(fd, &buf, len(buf), {})
-		if n <= 0 do break
-		append(&held, ..buf[:n])
+		count := posix.recv(descriptor, &chunk, len(chunk), {})
+		if count <= 0 do break
+		append(&held, ..chunk[:count])
 
 		for {
-			i := strings.index_byte(string(held[:]), '\n')
-			if i < 0 do break
-			line := strings.clone(string(held[:i]), context.temp_allocator)
-			remove_range(&held, 0, i + 1)
+			newline := strings.index_byte(string(held[:]), '\n')
+			if newline < 0 do break
+			line := strings.clone(string(held[:newline]), context.temp_allocator)
+			remove_range(&held, 0, newline + 1)
 
-			if len(line) > MAX_LINE {
+			if len(line) + 1 > MAX_LINE { // the limit counts the newline
 				fmt.eprintln("line over the limit, skipped")
 				continue
 			}
-			m, good := parse(line, context.temp_allocator)
+			message, good := parse(line, context.temp_allocator)
 			if !good do continue
 
-			fmt.printfln("%-12s %v %v", m.kind, m.subj[:], m.attr)
-			if m.kind == "sync" {
-				msg := "TAG\t4\n"
-				posix.send(fd, raw_data(msg), len(msg), {})
+			fmt.printfln("%-8s %-16s %v", message.verb, message.topic, message.fields)
+			if message.verb == "sync" {
+				request := "publish\ttag/request\ttag=4\n"
+				posix.send(descriptor, raw_data(request), len(request), {})
 			}
 		}
 		free_all(context.temp_allocator)
