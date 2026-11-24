@@ -18,8 +18,9 @@ Tab separated, verb first, then a topic whose first segment is the kind.
 Subscribe and you get every value true right now, then the changes as they
 happen. Publish `tag/request` on the same connection to switch tags.
 
-The rules are MQTT 3.1.1's: `retain`, `publish`, `subscribe`, `will`. The wire
-is text you can read, not MQTT's binary.
+The rules are MQTT 3.1.1's: `retain`, `publish`, `subscribe`, `will`, plus a
+`delete` where MQTT sends an empty retain. The wire is text you can read, not
+MQTT's binary.
 
 The whole thing is one page: [SPEC.md](SPEC.md).
 

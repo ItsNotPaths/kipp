@@ -7,6 +7,7 @@ socat - UNIX-CONNECT:"$SOCK" | while IFS='	' read -r verb topic payload; do
 	case $verb in
 	version) echo "connected, version $topic" ;;
 	sync)    echo "--- $topic complete ---" ;;
+	delete)  echo "gone $topic" ;;
 	retain | publish)
 		case ${topic%%/*} in
 		tag) echo "tag ${topic#tag/} $payload" ;;

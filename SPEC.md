@@ -52,6 +52,7 @@ name, a device path. A name a person typed belongs in the payload.
 | `subscribe` | client | send me what matches this pattern |
 | `unsubscribe` | client | stop sending what matches this pattern |
 | `retain` | both | a value. The broker keeps it and forwards it |
+| `delete` | both | a value is gone. The broker forgets it and forwards it |
 | `publish` | both | an event. The broker forwards it and keeps nothing |
 | `sync` | broker | the retained lines for one `subscribe` are all sent |
 | `error` | broker | a line from the client failed |
@@ -72,7 +73,7 @@ one. The broker answers any other line sent before `connect` with
 `error noconnect`.
 
 After `connect`, the client sends any of `will`, `subscribe`, `unsubscribe`,
-`retain` and `publish`, in any order and at any time. The broker sends forwarded
+`retain`, `delete` and `publish`, in any order and at any time. The broker sends forwarded
 lines, `sync` and `error` on the same connection, in the order they happen.
 
 ```
@@ -87,19 +88,24 @@ retain	battery/BAT0	level=79	state=charging
 publish	tag/request	tag=4
 ```
 
-## Retain and publish
+## Retain, delete and publish
 
 **`retain`** is a value. The broker stores the line under its topic, replacing
 the one stored before, and forwards it to every client whose pattern matches.
-It forwards it as `retain`, so a reader knows that it is a value.
+It forwards it as `retain`, so a reader knows that it is a value. A `retain`
+has at least one field; one with no payload gets `error badarg`.
 
-**`retain` with no payload** deletes the value. The broker forgets the topic and
-forwards the line. A reader forgets the topic too.
+**`delete`** says the value is gone. It has no payload. The broker forgets the
+topic and forwards the line to every client whose pattern matches. A reader
+forgets the topic too.
 
 ```
 retain	tray/:1.456	state=registered
-retain	tray/:1.456
+delete	tray/:1.456
 ```
+
+MQTT deletes with an empty retained message. kipp gives it its own verb, so a
+delete is never read from the shape of a value.
 
 **`publish`** is an event. The broker forwards it to every client whose pattern
 matches and stores nothing. A client that is not connected never sees it.
@@ -125,7 +131,7 @@ The pattern is matched against the topic with `fnmatch(3)`, without
 `FNM_PATHNAME`. So `*` matches across `/`: `battery/*` is everything under
 battery, and `*` is everything.
 
-This is one of kipp's two changes to MQTT's rules. MQTT's `+` and `#` are not used.
+This is one of kipp's changes to MQTT's rules. MQTT's `+` and `#` are not used.
 
 The broker answers a `subscribe` with every retained line that the pattern
 matches, then one `sync` line that repeats the pattern:
@@ -146,7 +152,7 @@ the `sync` again. `unsubscribe` with the same pattern removes it.
 will	retain	status/bar	state=offline
 ```
 
-The fields after `will` are one `retain` or `publish` line. When the client's
+The fields after `will` are one `retain`, `delete` or `publish` line. When the client's
 connection ends, for any reason, the broker acts on that line as if the client
 had sent it. A later `will` replaces the earlier one.
 
@@ -172,6 +178,7 @@ A failed line gets one `error` line. The second field is a code, not a topic.
 ```
 error	badverb	verb=pubish	msg=unknown verb
 error	badtopic	topic=Tag/1	msg=kind must be lowercase
+error	badarg	topic=tray/:1.456	msg=retain needs a field, delete has none
 error	noconnect	msg=send connect first
 error	toolong	msg=line over 1024 bytes
 ```

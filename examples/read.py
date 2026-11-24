@@ -38,8 +38,8 @@ def main():
     connection.connect(SOCK)
     connection.sendall(b"connect\tread_py\nsubscribe\t*\n")
 
-    # A real reader holds values, so a retain with no payload has something
-    # to forget, and status/* can mark a source's values as old.
+    # A real reader holds values, so a delete has something to forget, and
+    # status/* can mark a source's values as old.
     values = {}
     synced = False
 
@@ -50,10 +50,9 @@ def main():
         verb, topic, fields = message
 
         if verb == "retain":
-            if fields:
-                values[topic] = fields
-            else:
-                values.pop(topic, None)  # no payload: gone. Forget it
+            values[topic] = fields
+        elif verb == "delete":
+            values.pop(topic, None)
 
         print(f"{verb:8} {topic:16} {fields}", flush=True)
 

@@ -10,7 +10,7 @@ kippsrv. These are readers, 20 to 100 lines each.
 | --- | --- |
 | `read.sh` | the wire is plain text. socat, `while read`, and a `case` |
 | `read.lua` | the parse rule alone. Reads lines on stdin |
-| `read.py` | the whole session. Holds values, so a `retain` with no payload and `status/*` do something |
+| `read.py` | the whole session. Holds values, so a `delete` and `status/*` do something |
 | `read.odin` | the same session with typed parsing and an arena |
 | `check.sh` | replays one fixed session to every reader and checks the output |
 

@@ -20,7 +20,7 @@ printf '%s\n' \
 	'retain	mystery/1	stray	x=1' \
 	'sync	*' \
 	'publish	key_press	key=super+3' \
-	'retain	tag/eDP-1/2' >"$SESSION"
+	'delete	tag/eDP-1/2' >"$SESSION"
 
 socat UNIX-LISTEN:"$SOCK",fork SYSTEM:"cat $SESSION; sleep 1" 2>/dev/null &
 REPLAY=$!

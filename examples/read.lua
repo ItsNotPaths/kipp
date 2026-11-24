@@ -21,7 +21,9 @@ for line in io.lines() do
 	local verb, topic, fields = parse(line)
 	local kind, rest = (topic or ""):match("^([^/]*)/?(.*)$")
 	if verb == "retain" and kind == "tag" then
-		print(("tag %s is %s"):format(rest, fields.state or "gone"))
+		print(("tag %s is %s"):format(rest, fields.state))
+	elseif verb == "delete" and kind == "tag" then
+		print(("tag %s is gone"):format(rest))
 	elseif verb == "retain" and kind == "net" then
 		print(("net %s ssid=%s signal=%s"):format(rest, fields.ssid, fields.signal))
 	elseif verb == "sync" then

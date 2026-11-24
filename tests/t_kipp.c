@@ -42,7 +42,7 @@ static void test_parse(void)
 	ok(kipp_parse(&message, "publish\tx/1\tstray\t=v\tkey=value") == 0, "parse stray");
 	ok(message.field_count == 1, "stray fields skipped");
 
-	ok(kipp_parse(&message, "retain\ttray/:1.456") == 0, "empty payload");
+	ok(kipp_parse(&message, "delete\ttray/:1.456") == 0, "empty payload");
 	ok(message.field_count == 0, "no fields");
 
 	char many[KIPP_MAX_LINE] = "retain\tx/1";
@@ -86,8 +86,8 @@ static void test_build(void)
 	ok(strcmp(kipp_text(&record), "retain\tbattery/BAT0\tlevel=80\tstate=charging") == 0,
 	   "build");
 
-	kipp_begin(&record, "retain", "tray/:1.456");
-	ok(strcmp(kipp_text(&record), "retain\ttray/:1.456") == 0, "delete has no payload");
+	kipp_begin(&record, "delete", "tray/:1.456");
+	ok(strcmp(kipp_text(&record), "delete\ttray/:1.456") == 0, "delete has no payload");
 
 	/* a tab or a newline in a value cannot forge a line */
 	kipp_begin(&record, "retain", "title/0x1");
